@@ -850,6 +850,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
             _tg_proxy = resolve_proxy_url("TELEGRAM_PROXY", target_hosts=["api.telegram.org"])
         except Exception:
             _tg_proxy = None
+        bot = None
         if _tg_proxy:
             try:
                 from telegram.request import HTTPXRequest
@@ -861,9 +862,27 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                 )
             except Exception as _proxy_err:
                 logger.warning("send_message: failed to attach Telegram proxy (%s), falling back to direct connection", _proxy_err)
+                bot = None
+        if bot is None:
+            # No proxy configured (or proxy attach failed): try fallback-IP
+            # transport so transient DNS failures (e.g. Mac sleep/wake) don't
+            # permanently drop standalone one-shot sends.
+            try:
+                from telegram.request import HTTPXRequest
+                from gateway.platforms.telegram_network import (
+                    TelegramFallbackTransport,
+                    discover_fallback_ips,
+                )
+                _fallback_ips = await discover_fallback_ips()
+                if _fallback_ips:
+                    _request = HTTPXRequest(
+                        httpx_kwargs={"transport": TelegramFallbackTransport(_fallback_ips)}
+                    )
+                    bot = Bot(token=token, request=_request)
+                else:
+                    bot = Bot(token=token)
+            except Exception:
                 bot = Bot(token=token)
-        else:
-            bot = Bot(token=token)
         int_chat_id = int(chat_id)
         media_files = media_files or []
         thread_kwargs = {}

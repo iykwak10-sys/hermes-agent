@@ -17,6 +17,8 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from contextlib import contextmanager
 
 # fcntl is Unix-only; on Windows use msvcrt for file locking
@@ -109,6 +111,97 @@ def _resolve_cron_enabled_toolsets(job: dict, cfg: dict) -> list[str] | None:
             exc,
         )
         return None
+# ---------------------------------------------------------------------------
+# Delivery retry queue
+#
+# When a cron delivery fails with a transient network error the entry is
+# pushed here and retried on subsequent ticks with exponential backoff.
+# Only network-class errors are retried; permanent errors (bad token,
+# unknown platform, etc.) are NOT.
+# ---------------------------------------------------------------------------
+
+_pending_deliveries: list = []
+_pending_deliveries_lock = threading.Lock()
+
+# Retry backoff in seconds, indexed by attempt number (0-based).
+_DELIVERY_RETRY_BACKOFF = [30, 60, 300]
+_DELIVERY_RETRY_MAX = len(_DELIVERY_RETRY_BACKOFF)
+
+_NETWORK_ERROR_KEYWORDS = frozenset({
+    "connecterror",
+    "networkerror",
+    "nodename nor servname",
+    "all connection attempts failed",
+    "errno 8",
+    "connection refused",
+    "connect timeout",
+    "httpx.connecterror",
+})
+
+
+def _is_network_delivery_error(error_str: str) -> bool:
+    """Return True when the delivery error looks like a transient network failure."""
+    low = error_str.lower()
+    return any(kw in low for kw in _NETWORK_ERROR_KEYWORDS)
+
+
+def _queue_delivery_retry(job: dict, content: str, adapters, loop) -> None:
+    """Push a failed delivery into the retry queue for the next tick."""
+    entry = {
+        "job": job,
+        "content": content,
+        "attempts": 0,
+        "next_try": time.monotonic() + _DELIVERY_RETRY_BACKOFF[0],
+        "adapters": adapters,
+        "loop": loop,
+    }
+    with _pending_deliveries_lock:
+        _pending_deliveries.append(entry)
+    logger.info(
+        "Job '%s': delivery queued for retry in %ds (attempt 1/%d)",
+        job["id"], _DELIVERY_RETRY_BACKOFF[0], _DELIVERY_RETRY_MAX,
+    )
+
+
+def _retry_pending_deliveries(adapters=None, loop=None) -> None:
+    """Re-attempt any queued deliveries whose backoff window has elapsed."""
+    now = time.monotonic()
+    with _pending_deliveries_lock:
+        due = [e for e in _pending_deliveries if e["next_try"] <= now]
+        for e in due:
+            _pending_deliveries.remove(e)
+
+    for entry in due:
+        job = entry["job"]
+        attempt = entry["attempts"] + 1
+        logger.info(
+            "Job '%s': retrying delivery (attempt %d/%d)",
+            job["id"], attempt, _DELIVERY_RETRY_MAX,
+        )
+        # Use the live adapters from this tick if available, otherwise fall
+        # back to whatever was captured when the entry was first queued.
+        effective_adapters = adapters if adapters is not None else entry["adapters"]
+        effective_loop = loop if loop is not None else entry["loop"]
+        err = _deliver_result(job, entry["content"], adapters=effective_adapters, loop=effective_loop)
+        if err is None:
+            logger.info("Job '%s': retry delivery succeeded", job["id"])
+        elif _is_network_delivery_error(err) and attempt < _DELIVERY_RETRY_MAX:
+            next_backoff = _DELIVERY_RETRY_BACKOFF[attempt]
+            new_entry = dict(entry)
+            new_entry["attempts"] = attempt
+            new_entry["next_try"] = time.monotonic() + next_backoff
+            with _pending_deliveries_lock:
+                _pending_deliveries.append(new_entry)
+            logger.warning(
+                "Job '%s': retry delivery failed (%s), next attempt in %ds",
+                job["id"], err, next_backoff,
+            )
+        else:
+            logger.error(
+                "Job '%s': delivery permanently failed after %d attempt(s): %s",
+                job["id"], attempt, err,
+            )
+
 
 # Valid delivery platforms — used to validate user-supplied platform names
 # in cron delivery targets, preventing env var enumeration via crafted names.
@@ -1887,6 +1980,10 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
         return 0
 
     try:
+        # Re-attempt any deliveries that failed with a transient network error
+        # on a previous tick and whose backoff window has now elapsed.
+        _retry_pending_deliveries(adapters=adapters, loop=loop)
+
         due_jobs = get_due_jobs()
 
         if verbose and not due_jobs:
@@ -1953,9 +2050,13 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                 if should_deliver:
                     try:
                         delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
+                        if delivery_error and _is_network_delivery_error(delivery_error):
+                            _queue_delivery_retry(job, deliver_content, adapters, loop)
                     except Exception as de:
                         delivery_error = str(de)
                         logger.error("Delivery failed for job %s: %s", job["id"], de)
+                        if _is_network_delivery_error(str(de)):
+                            _queue_delivery_retry(job, deliver_content, adapters, loop)
 
                 # Treat empty final_response as a soft failure so last_status
                 # is not "ok" — the agent ran but produced nothing useful.
