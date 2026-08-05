@@ -187,6 +187,9 @@ export function ChatBar({
   // engine writes it — an explicit shared handle, not a back-reference.
   const queueEditRef = useRef<QueueEditState | null>(null)
   const composingRef = useRef(false) // true during IME composition (CJK input)
+  // Set when Enter is pressed during IME composition, so compositionend can
+  // auto-submit after the IME commits its text (macOS Korean IME, #44278).
+  const imeEnterRef = useRef(false)
 
   const { availableThemes, themeName } = useTheme()
   const at = useAtCompletions({ gateway: gateway ?? null, sessionId: sessionId ?? null, cwd: cwd ?? null })
@@ -524,7 +527,13 @@ export function ChatBar({
     // across browsers) and nativeEvent.isComposing (Chromium fallback).  Without
     // this guard, pressing Enter to finalise a Korean/Japanese/Chinese IME
     // preedit fires submitDraft() and splits the message mid-word.
+    // When Enter is blocked because of an active composition, flag it so
+    // compositionend can auto-submit after the IME commits (#44278).
     if (composingRef.current || event.nativeEvent.isComposing) {
+      if (event.key === 'Enter') {
+        imeEnterRef.current = true
+      }
+
       return
     }
 
@@ -991,6 +1000,18 @@ export function ChatBar({
           // `hasComposerPayload` stays false and the send button stays hidden
           // until an unrelated edit forces a sync (#39614).
           flushEditorToDraft(event.currentTarget)
+
+          // If Enter was pressed during composition (macOS Korean IME:
+          // keydown(Enter) fires before compositionend), auto-submit the
+          // now-committed text so the user doesn't have to press Enter twice
+          // and the last syllable doesn't get stranded (#44278).
+          if (imeEnterRef.current) {
+            imeEnterRef.current = false
+            // Defer to the next microtask so React has flushed the
+            // setComposerText from flushEditorToDraft above, and the DOM
+            // is fully settled with the committed IME text.
+            window.setTimeout(() => submitDraft(), 0)
+          }
         }}
         onCompositionStart={event => {
           composingRef.current = true
