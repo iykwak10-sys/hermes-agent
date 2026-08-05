@@ -1163,6 +1163,32 @@ export function TextInput({
       if (k.return) {
         flushKeyBurst()
 
+        // When an IME commits its final composition and Enter in the same
+        // event, inp carries the committed text. Apply it to vRef.current
+        // synchronously so cbSubmit sees the full value — otherwise the
+        // last composed syllable is left behind (Korean IME, #38117).
+        if (inp.length > 0 && PRINTABLE.test(inp.replace(BRACKET_PASTE, ''))) {
+          const text = inp.replace(BRACKET_PASTE, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+
+          if (text && text !== '\n') {
+            const range = selRange()
+            const inserted = applyPrintableInsert(vRef.current, curRef.current, text, range)
+
+            if (inserted) {
+              curRef.current = inserted.cursor
+              vRef.current = inserted.value
+              selRef.current = null
+              lineWidthRef.current = stringWidth(
+                inserted.value.includes('\n')
+                  ? inserted.value.slice(inserted.value.lastIndexOf('\n') + 1)
+                  : inserted.value
+              )
+              undo.current = []
+              redo.current = []
+            }
+          }
+        }
+
         const sequence = (event.keypress as { sequence?: string }).sequence
         const preserveBareLineFeed = shouldPreserveCtrlJNewline() && sequence === '\n'
 
