@@ -514,11 +514,7 @@ export function ChatBar({
     // composing flag may still be legitimate and the Enter keydown fires
     // before compositionend on some IMEs (macOS Korean IME, #44278).
     // The blur reset (onBlur) handles the Enter-path wedge recovery instead.
-    if (
-      composingRef.current &&
-      !event.nativeEvent.isComposing &&
-      event.key !== 'Enter'
-    ) {
+    if (composingRef.current && !event.nativeEvent.isComposing && event.key !== 'Enter') {
       composingRef.current = false
     }
 
