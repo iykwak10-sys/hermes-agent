@@ -502,6 +502,23 @@ export function ChatBar({
   }
 
   const handleEditorKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    // Self-heal a stale IME composition flag. If compositionend is missed —
+    // focus jump, input-source switch, or a programmatic DOM mutation aborting
+    // the preedit — composingRef can wedge true and silently block every send.
+    // Chromium guarantees every keydown during genuine composition carries
+    // nativeEvent.isComposing === true, so a mismatch means the ref is stale.
+    // Clear it before the guard reads it — but NOT for Enter, where the
+    // composing flag may still be legitimate and the Enter keydown fires
+    // before compositionend on some IMEs (macOS Korean IME, #44278).
+    // The blur reset (onBlur) handles the Enter-path wedge recovery instead.
+    if (
+      composingRef.current &&
+      !event.nativeEvent.isComposing &&
+      event.key !== 'Enter'
+    ) {
+      composingRef.current = false
+    }
+
     // IME composition: Enter confirms composed text, not a message submission.
     // We check both composingRef (set by compositionstart/compositionend, robust
     // across browsers) and nativeEvent.isComposing (Chromium fallback).  Without
@@ -954,7 +971,15 @@ export function ChatBar({
         data-placeholder={placeholder}
         data-slot={RICH_INPUT_SLOT}
         onBeforeInput={handleEditorBeforeInput}
-        onBlur={() => window.setTimeout(closeTrigger, 80)}
+        onBlur={() => {
+          // A composition cannot survive focus loss — Chromium commits the
+          // preedit and fires compositionend on blur. If that was missed
+          // (input-source switch, programmatic DOM mutation, etc.), this
+          // un-wedges the flag so the Send button + Enter path recover
+          // without a remount (#44135, #44149).
+          composingRef.current = false
+          window.setTimeout(closeTrigger, 80)
+        }}
         onCompositionEnd={event => {
           composingRef.current = false
 
