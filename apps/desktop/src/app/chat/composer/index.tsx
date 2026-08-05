@@ -991,26 +991,30 @@ export function ChatBar({
         }}
         onCompositionEnd={event => {
           composingRef.current = false
-
-          // The input events fired *during* composition were skipped (they
-          // carried uncommitted preedit text), and Chromium does NOT reliably
-          // emit a trailing input event after compositionend on Windows IMEs.
-          // Without flushing here, committed multi-character IME input (e.g.
-          // Chinese "你好", Japanese, Korean) never reaches composer state, so
-          // `hasComposerPayload` stays false and the send button stays hidden
-          // until an unrelated edit forces a sync (#39614).
-          flushEditorToDraft(event.currentTarget)
+          const editor = event.currentTarget
 
           // If Enter was pressed during composition (macOS Korean IME:
-          // keydown(Enter) fires before compositionend), auto-submit the
-          // now-committed text so the user doesn't have to press Enter twice
-          // and the last syllable doesn't get stranded (#44278).
+          // keydown(Enter) fires before compositionend), defer the flush
+          // and auto-submit to the next animation frame so the IME has
+          // time to insert the committed Hangul syllable into the DOM.
+          // rAF ensures the browser has rendered the committed text before
+          // we read it and submit (#44278).
           if (imeEnterRef.current) {
             imeEnterRef.current = false
-            // Defer to the next microtask so React has flushed the
-            // setComposerText from flushEditorToDraft above, and the DOM
-            // is fully settled with the committed IME text.
-            window.setTimeout(() => submitDraft(), 0)
+            window.requestAnimationFrame(() => {
+              flushEditorToDraft(editor)
+              // Defer submit one more tick so React processes the
+              // setComposerText from flushEditorToDraft above.
+              window.setTimeout(() => submitDraft(), 0)
+            })
+          } else {
+            // The input events fired *during* composition were skipped
+            // (they carried uncommitted preedit text), and Chromium does
+            // NOT reliably emit a trailing input event after
+            // compositionend on Windows IMEs.  Flush synchronously so
+            // committed multi-character IME input reaches composer state
+            // (#39614).
+            flushEditorToDraft(editor)
           }
         }}
         onCompositionStart={event => {
