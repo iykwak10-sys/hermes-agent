@@ -736,7 +736,7 @@ export function TextInput({
   }, [cur, display, focus, nativeCursor, placeholder, placeholderColor, selected])
 
   useEffect(() => {
-    const ownEcho = self.current && value === vRef.current
+    const ownEcho = self.current && value === vRef.current && value !== ''
     self.current = false
 
     if (ownEcho) {
