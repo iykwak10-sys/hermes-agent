@@ -37,9 +37,13 @@ on:
         required: false
         type: string
         default: '5'
-  schedule:
-    # Every 12 hours, off the hour to avoid the top-of-hour runner crunch.
-    - cron: '20 7,19 * * *'
+  # NOTE (fork): the twice-daily schedule is intentionally disabled on this
+  # fork. The scheduled run exercises upstream's installer end to end, and it
+  # fails on an npm-in-sandbox issue that is upstream's to resolve
+  # (NousResearch/hermes-agent#87340), not this fork's -- so the only thing the
+  # schedule produced here was a recurring failure notification. Run it on
+  # demand with the "Run workflow" button (workflow_dispatch) instead; release
+  # tags still trigger it below.
   push:
     tags:
       # Release tags only: the repo also carries backup/* and one-off tags.
