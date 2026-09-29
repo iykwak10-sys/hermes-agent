@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import platform
+import re
 import secrets
 import stat
 import subprocess
@@ -1346,6 +1347,51 @@ def _write_claude_code_credentials(
             raise
     except (OSError, IOError) as e:
         logger.debug("Failed to write refreshed credentials: %s", e)
+    _sync_claude_code_keychain(access_token, refresh_token, expires_at_ms)
+
+
+def _sync_claude_code_keychain(access_token: str, refresh_token: str, expires_at_ms: int) -> None:
+    """Mirror a Hermes-side refresh into Claude Code's macOS Keychain entry.
+
+    Refresh tokens are single-use. Claude Code reads the Keychain before the
+    credentials file, so once Hermes rotates the pair, the Keychain copy holds
+    a dead refresh token; Claude Code's next refresh then fails and it blanks
+    the entry, logging the CLI out. Only an existing entry is updated.
+    """
+    if platform.system() != "Darwin":
+        return
+    service = "Claude Code-credentials"
+    try:
+        found = subprocess.run(
+            ["security", "find-generic-password", "-s", service, "-w"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=5, stdin=subprocess.DEVNULL,
+        )
+        if found.returncode != 0:
+            return
+        payload = json.loads(found.stdout.strip())
+        oauth = payload.get("claudeAiOauth") if isinstance(payload, dict) else None
+        if not isinstance(oauth, dict):
+            return
+        # Without -w, security prints the item attributes (incl. account).
+        attrs = subprocess.run(
+            ["security", "find-generic-password", "-s", service],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=5, stdin=subprocess.DEVNULL,
+        )
+        account = re.search(r'"acct"<blob>="([^"]*)"', attrs.stdout + attrs.stderr)
+        if not account:
+            return
+        oauth.update(accessToken=access_token, refreshToken=refresh_token, expiresAt=expires_at_ms)
+        secret_hex = json.dumps(payload, separators=(",", ":")).encode("utf-8").hex()
+        # Fed through `security -i` so the tokens never appear in process argv.
+        subprocess.run(
+            ["security", "-i"],
+            input=f'add-generic-password -U -a "{account.group(1)}" -s "{service}" -X "{secret_hex}"\n',
+            capture_output=True, text=True, encoding="utf-8", timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError) as e:
+        logger.debug("Failed to mirror refreshed credentials to Keychain: %s", e)
 
 
 def _resolve_claude_code_token_from_credentials(creds: Optional[Dict[str, Any]] = None) -> Optional[str]:

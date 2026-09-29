@@ -263,3 +263,68 @@ class TestRefreshOAuthTokenAdoptsFreshCredential:
         # Prefers the live source's refresh token over the caller's stale copy.
         assert captured["refresh_token"] == "live-refresh"
 
+
+@pytest.mark.macos_only
+class TestSyncClaudeCodeKeychain:
+    """A Hermes-side refresh rotates the single-use refresh token, so the copy in
+    Claude Code's Keychain entry must be updated too; otherwise Claude Code's
+    next refresh fails and it blanks the entry, logging the CLI out."""
+
+    _ATTRS = 'keychain: "login"\n    "acct"<blob>="alice"\n    "svce"<blob>="Claude Code-credentials"\n'
+
+    def _run(self, payload):
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append((args, kwargs))
+            if args[:2] == ["security", "find-generic-password"] and "-w" in args:
+                if payload is None:
+                    return MagicMock(returncode=44, stdout="", stderr="")
+                return MagicMock(returncode=0, stdout=json.dumps(payload), stderr="")
+            if args[:2] == ["security", "find-generic-password"]:
+                return MagicMock(returncode=0, stdout="", stderr=self._ATTRS)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        from agent.anthropic_adapter import _sync_claude_code_keychain
+        with patch("agent.anthropic_adapter.platform.system", return_value="Darwin"), \
+             patch("agent.anthropic_adapter.subprocess.run", side_effect=fake_run):
+            _sync_claude_code_keychain("new-access", "new-refresh", 4242)
+        return calls
+
+    @staticmethod
+    def _written(calls):
+        writes = [kw["input"] for args, kw in calls if args == ["security", "-i"]]
+        assert len(writes) == 1
+        line = writes[0]
+        assert '-U -a "alice" -s "Claude Code-credentials" -X "' in line
+        hex_payload = line.split('-X "', 1)[1].split('"', 1)[0]
+        return json.loads(bytes.fromhex(hex_payload))
+
+    def test_updates_tokens_and_preserves_other_fields(self):
+        calls = self._run({"claudeAiOauth": {
+            "accessToken": "old", "refreshToken": "dead", "expiresAt": 1,
+            "scopes": ["user:inference"], "subscriptionType": "pro"}})
+        oauth = self._written(calls)["claudeAiOauth"]
+        assert (oauth["accessToken"], oauth["refreshToken"], oauth["expiresAt"]) == ("new-access", "new-refresh", 4242)
+        assert oauth["scopes"] == ["user:inference"]
+        assert oauth["subscriptionType"] == "pro"
+
+    def test_heals_blanked_entry(self):
+        calls = self._run({"claudeAiOauth": {"accessToken": "", "refreshToken": "", "expiresAt": 0, "scopes": []}})
+        assert self._written(calls)["claudeAiOauth"]["accessToken"] == "new-access"
+
+    def test_never_creates_missing_entry(self):
+        calls = self._run(None)
+        assert not [args for args, _ in calls if args == ["security", "-i"]]
+
+    def test_secret_not_on_command_line(self):
+        calls = self._run({"claudeAiOauth": {"accessToken": "old", "refreshToken": "dead", "expiresAt": 1}})
+        assert all("new-refresh" not in " ".join(args) for args, _ in calls)
+
+    def test_write_credentials_mirrors_to_keychain(self, tmp_path, monkeypatch):
+        from agent.anthropic_adapter import _write_claude_code_credentials
+        monkeypatch.setattr("agent.anthropic_adapter.Path.home", lambda: tmp_path)
+        with patch("agent.anthropic_adapter._sync_claude_code_keychain") as sync:
+            _write_claude_code_credentials("tok", "ref", 12345)
+        sync.assert_called_once_with("tok", "ref", 12345)
+

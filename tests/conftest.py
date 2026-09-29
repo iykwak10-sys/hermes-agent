@@ -637,6 +637,12 @@ def _neutralize_macos_keychain_creds(request, monkeypatch):
         lambda *_args, **_kwargs: None,
         raising=False,
     )
+    monkeypatch.setattr(
+        _anthropic_adapter,
+        "_sync_claude_code_keychain",
+        lambda *_args, **_kwargs: None,
+        raising=False,
+    )
     return None
 
 
