@@ -6105,6 +6105,28 @@ class BasePlatformAdapter(ABC):
             # session lifecycle and its cleanup races with the running task
             # (see PR #4926).
             cmd = event.get_command()
+            # Local voice-approval safety guard: do not interrupt an existing
+            # Telegram turn, merge an approval into pending text, or imply that
+            # an approval has been accepted while this session is busy.
+            voice_first = (event.text or "").strip().split(maxsplit=1)
+            voice_word = voice_first[0].split("@", 1)[0].lower() if voice_first else ""
+            voice_commands = {
+                "/calltask", "/call_proposal_approval", "/call-proposal-approval",
+                "음성확인", "음성승인", "음성거절", "음성상태",
+            }
+            if (event.source.platform == Platform.TELEGRAM
+                and event.allow_gateway_control and not getattr(event, "internal", False)
+                and voice_word in voice_commands):
+                await self._send_with_retry(
+                    chat_id=event.source.chat_id,
+                    content=("[통화 승인 대기] 다른 작업이 진행 중입니다. "
+                             "이번 요청은 접수하거나 실행하지 않았습니다. "
+                             "현재 작업이 끝난 뒤 다시 보내주세요."),
+                    reply_to=_reply_anchor_for_event(event),
+                    metadata=_mark_notify_metadata(_thread_metadata_for_source(
+                        event.source, _reply_anchor_for_event(event))),
+                )
+                return
             from hermes_cli.commands import (
                 is_interrupt_then_dispatch,
                 should_bypass_active_session,
