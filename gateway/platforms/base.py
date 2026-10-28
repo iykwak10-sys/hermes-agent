@@ -6114,9 +6114,31 @@ class BasePlatformAdapter(ABC):
                 "/calltask", "/call_proposal_approval", "/call-proposal-approval",
                 "음성확인", "음성승인", "음성거절", "음성상태",
             }
+            # Local calendar-reply safety guard: only read mapping, never approve.
+            calendar_reply = False
+            if event.source.platform == Platform.TELEGRAM and not getattr(event, "internal", False):
+                calendar_reply = not getattr(event, "reply_to_message_id", None) and (event.text or "").strip() in {
+                    "등록해", "등록해줘", "등록해주세요", "등록해 주세요",
+                }
+                reply_id = getattr(event, "reply_to_message_id", None)
+                if reply_id:
+                    try:
+                        import sqlite3 as _voice_sqlite
+                        from pathlib import Path as _VoicePath
+                        _voice_db = _voice_sqlite.connect(
+                            "file:" + str(_VoicePath.home() / "CallPipeline/state.sqlite") + "?mode=ro",
+                            uri=True, timeout=1)
+                        try:
+                            calendar_reply = calendar_reply or bool(_voice_db.execute(
+                                "SELECT 1 FROM calendar_draft_messages WHERE owner=? AND message_id=?",
+                                (str(event.source.chat_id), str(reply_id))).fetchone())
+                        finally:
+                            _voice_db.close()
+                    except Exception:
+                        calendar_reply = calendar_reply or (getattr(event, "reply_to_text", "") or "").startswith("[통화 일정 미리보기")
             if (event.source.platform == Platform.TELEGRAM
                 and event.allow_gateway_control and not getattr(event, "internal", False)
-                and voice_word in voice_commands):
+                and (voice_word in voice_commands or calendar_reply)):
                 await self._send_with_retry(
                     chat_id=event.source.chat_id,
                     content=("[통화 승인 대기] 다른 작업이 진행 중입니다. "
